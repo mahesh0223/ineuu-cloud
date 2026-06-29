@@ -8,11 +8,13 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Cleaned up S3Client (we don't need signature hacks for server-side uploads!)
+// S3Client with Checksum Bypasses restored to stop 'IncompleteBody'
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
+    requestChecksumCalculation: "WHEN_REQUIRED", // 🔥 Stops SDK from appending extra data
+    responseChecksumValidation: "WHEN_REQUIRED", // 🔥 Stops SDK from rejecting B2's response
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
@@ -22,7 +24,6 @@ const s3 = new S3Client({
 // Server-Side Upload Proxy
 app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     try {
-        // Safety check: Ensure the file actually made it to the server
         if (!req.body || req.body.length === 0) {
             return res.status(400).json({ success: false, message: "Server received an empty file." });
         }
@@ -35,13 +36,12 @@ app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb'
             Bucket: "ineuu-assets", 
             Key: safeName,
             ContentType: fileType || "application/octet-stream",
-            ContentLength: req.body.length, // 🔥 CRITICAL FIX: explicitly tell Backblaze the exact byte size
+            ContentLength: req.body.length, 
             Body: req.body 
         });
         
         await s3.send(command);
         
-        // Generate the secure read link
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
         
