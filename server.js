@@ -15,8 +15,8 @@ const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     credentials: {
-        accessKeyId: "a1feb14f280f",         
-        secretAccessKey: "005fd73582580481087942692d5670b6e4eea029c4", 
+        accessKeyId: "005a1feb14f280f0000000002",         
+        secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
     }
 });
 
