@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const https = require("https"); 
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -27,24 +28,51 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             return res.status(400).json({ success: false, message: "No file data received." });
         }
 
-        // 1. Decode the Base64 text back into raw binary
         const buffer = Buffer.from(fileData, 'base64');
-        
-        // 🔥 THE MAGIC BULLET: Cast to Uint8Array to force AWS SDK to send as a single block!
-        const uint8array = new Uint8Array(buffer);
-
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
+        const contentType = fileType || "application/octet-stream";
         
+        // 1. Generate the perfect signature using the AWS SDK
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: fileType || "application/octet-stream",
-            ContentLength: uint8array.length,
-            Body: uint8array 
+            ContentType: contentType
         });
+        const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
         
-        await s3.send(command);
+        // 2. Parse the URL perfectly to preserve the signature parameters
+        const url = new URL(signedUploadUrl);
+        
+        // 3. Bypass Node's broken fetch and send raw bytes over pure HTTPS
+        await new Promise((resolve, reject) => {
+            const reqOptions = {
+                hostname: url.hostname,
+                port: 443,
+                path: url.pathname + url.search, // 🔥 CRITICAL FIX: Attaches the signature to the request
+                method: 'PUT',
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': buffer.length
+                }
+            };
+
+            const request = https.request(reqOptions, (response) => {
+                let resData = '';
+                response.on('data', chunk => resData += chunk);
+                response.on('end', () => {
+                    if (response.statusCode >= 200 && response.statusCode < 300) {
+                        resolve(); 
+                    } else {
+                        reject(new Error(`Backblaze Rejection [${response.statusCode}]: ${resData}`));
+                    }
+                });
+            });
+
+            request.on('error', (err) => reject(err));
+            request.write(buffer); // Send the solid, un-chopped binary block
+            request.end();         // Close connection exactly at the end of the file
+        });
         
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
@@ -52,7 +80,6 @@ app.post('/api/storage/upload-direct', async (req, res) => {
         res.json({ success: true, downloadUrl });
     } catch (error) {
         console.error("Direct Upload Failure:", error);
-        // 🔥 Pipe the EXACT error directly to the dashboard so we don't have to guess!
         res.status(500).json({ 
             success: false, 
             message: "Server upload failed.",
