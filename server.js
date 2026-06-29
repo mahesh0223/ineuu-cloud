@@ -1,8 +1,8 @@
 const express = require("express");
 const cors = require("cors");
+const https = require("https"); 
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const { Readable } = require("stream"); // 🔥 THE FIX: Node's native stream module
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,26 +30,54 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             return res.status(400).json({ success: false, message: "No file data received." });
         }
 
-        // 1. Decode the memory block
         const buffer = Buffer.from(fileData, 'base64');
-        
-        // 🔥 2. THE FIX: Convert the static block into an unstoppable live stream
-        const fileStream = Readable.from(buffer);
-
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
         
+        // 1. OMIT ContentType from the upload signature. This makes the URL immune to header mismatches!
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
-            Key: safeName,
-            ContentType: fileType || "application/octet-stream",
-            ContentLength: buffer.length, 
-            Body: fileStream // Hand the live stream to the AWS SDK
+            Key: safeName
+        });
+        const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
+        
+        const url = new URL(signedUploadUrl);
+        
+        // 2. Pure HTTPS request with ONLY the Content-Length. No signature mismatches possible.
+        await new Promise((resolve, reject) => {
+            const reqOptions = {
+                hostname: url.hostname,
+                port: 443,
+                path: url.pathname + url.search, 
+                method: 'PUT',
+                headers: {
+                    'Content-Length': buffer.length
+                }
+            };
+
+            const request = https.request(reqOptions, (response) => {
+                let resData = '';
+                response.on('data', chunk => resData += chunk);
+                response.on('end', () => {
+                    if (response.statusCode >= 200 && response.statusCode < 300) {
+                        resolve(); 
+                    } else {
+                        reject(new Error(`Backblaze Rejection [${response.statusCode}]: ${resData}`));
+                    }
+                });
+            });
+
+            request.on('error', (err) => reject(err));
+            request.write(buffer); // Send the raw, un-chunked binary
+            request.end();         
         });
         
-        await s3.send(command);
-        
-        const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
+        // 3. Inject the Content-Type into the DOWNLOAD link so the browser opens the PDF correctly!
+        const readCommand = new GetObjectCommand({ 
+            Bucket: "ineuu-assets", 
+            Key: safeName,
+            ResponseContentType: fileType || "application/octet-stream"
+        });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
         
         res.json({ success: true, downloadUrl });
