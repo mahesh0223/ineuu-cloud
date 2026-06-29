@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Cloud Storage Initialization with Path-Style and Checksum Bypasses
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
@@ -25,16 +26,17 @@ let connectedPanels = {
     "HW_ID_BOARD_02": { school_id: "Greenwood_Academy_Lab", status: "UNLOCKED" }
 };
 
+// 1. Generate secure direct browser upload URL signatures
 app.get('/api/storage/upload-url', async (req, res) => {
     try {
-        const { fileName } = req.query;
+        const { fileName, fileType } = req.query;
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`; 
         
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
-            Key: safeName
-            // 🔥 ContentType requirement REMOVED to prevent signature mismatch
+            Key: safeName,
+            ContentType: fileType || "application/octet-stream" // 🔥 Required for signature match
         });
 
         const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
@@ -45,6 +47,7 @@ app.get('/api/storage/upload-url', async (req, res) => {
     }
 });
 
+// 2. Generate secure temporary private read download links
 app.get('/api/storage/download-url/:fileName', async (req, res) => {
     try {
         const { fileName } = req.params;
@@ -57,6 +60,7 @@ app.get('/api/storage/download-url/:fileName', async (req, res) => {
     }
 });
 
+// MDM Device Cluster Control Hooks
 app.get('/api/mdm/panels', (req, res) => res.json(connectedPanels));
 
 app.post('/api/mdm/command', (req, res) => {
