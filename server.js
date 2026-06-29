@@ -1,6 +1,5 @@
 const express = require("express");
 const cors = require("cors");
-const https = require("https"); 
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -14,6 +13,9 @@ const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
+    // 🔥 FIX 1: Stops AWS from scrambling the signature
+    requestChecksumCalculation: "WHEN_REQUIRED", 
+    responseChecksumValidation: "WHEN_REQUIRED",
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
@@ -31,48 +33,17 @@ app.post('/api/storage/upload-direct', async (req, res) => {
         const buffer = Buffer.from(fileData, 'base64');
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
-        const contentType = fileType || "application/octet-stream";
         
-        // 1. Generate the perfect signature using the AWS SDK
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: contentType
+            ContentType: fileType || "application/octet-stream",
+            // 🔥 FIX 2: Stops Backblaze from throwing IncompleteBody
+            ContentLength: buffer.length, 
+            Body: buffer 
         });
-        const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
         
-        // 2. Parse the URL perfectly to preserve the signature parameters
-        const url = new URL(signedUploadUrl);
-        
-        // 3. Bypass Node's broken fetch and send raw bytes over pure HTTPS
-        await new Promise((resolve, reject) => {
-            const reqOptions = {
-                hostname: url.hostname,
-                port: 443,
-                path: url.pathname + url.search, // 🔥 CRITICAL FIX: Attaches the signature to the request
-                method: 'PUT',
-                headers: {
-                    'Content-Type': contentType,
-                    'Content-Length': buffer.length
-                }
-            };
-
-            const request = https.request(reqOptions, (response) => {
-                let resData = '';
-                response.on('data', chunk => resData += chunk);
-                response.on('end', () => {
-                    if (response.statusCode >= 200 && response.statusCode < 300) {
-                        resolve(); 
-                    } else {
-                        reject(new Error(`Backblaze Rejection [${response.statusCode}]: ${resData}`));
-                    }
-                });
-            });
-
-            request.on('error', (err) => reject(err));
-            request.write(buffer); // Send the solid, un-chopped binary block
-            request.end();         // Close connection exactly at the end of the file
-        });
+        await s3.send(command);
         
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
