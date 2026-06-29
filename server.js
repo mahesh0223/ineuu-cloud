@@ -6,9 +6,9 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Render's CORS handles the browser perfectly
 app.use(cors());
 
+// Cleaned up S3Client (we don't need signature hacks for server-side uploads!)
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
@@ -19,21 +19,26 @@ const s3 = new S3Client({
     }
 });
 
-// 🔥 THE NUCLEAR OPTION: Server-Side Upload Proxy
-// The browser sends the file here, and the server uploads it to Backblaze. No CORS restrictions!
+// Server-Side Upload Proxy
 app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     try {
+        // Safety check: Ensure the file actually made it to the server
+        if (!req.body || req.body.length === 0) {
+            return res.status(400).json({ success: false, message: "Server received an empty file." });
+        }
+
         const { fileName, fileType } = req.query;
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
         
-        // The server uploads the file directly. No signatures to mismatch!
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
             ContentType: fileType || "application/octet-stream",
-            Body: req.body // The raw file data received from the browser
+            ContentLength: req.body.length, // 🔥 CRITICAL FIX: explicitly tell Backblaze the exact byte size
+            Body: req.body 
         });
+        
         await s3.send(command);
         
         // Generate the secure read link
@@ -47,7 +52,6 @@ app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb'
     }
 });
 
-// Standard JSON parser must go AFTER the raw proxy route
 app.use(express.json()); 
 
 let connectedPanels = {
