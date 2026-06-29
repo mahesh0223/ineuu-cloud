@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const s3pkg = require("@aws-sdk/client-s3/package.json");
+console.log("🔎 RUNNING @aws-sdk/client-s3 version:", s3pkg.version);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
