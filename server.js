@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { Readable } = require("stream"); // 🔥 THE FIX: Node's native stream module
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,7 +14,6 @@ const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
-    // 🔥 FIX 1: Stops AWS from scrambling the signature
     requestChecksumCalculation: "WHEN_REQUIRED", 
     responseChecksumValidation: "WHEN_REQUIRED",
     credentials: {
@@ -30,7 +30,12 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             return res.status(400).json({ success: false, message: "No file data received." });
         }
 
+        // 1. Decode the memory block
         const buffer = Buffer.from(fileData, 'base64');
+        
+        // 🔥 2. THE FIX: Convert the static block into an unstoppable live stream
+        const fileStream = Readable.from(buffer);
+
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
         
@@ -38,9 +43,8 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             Bucket: "ineuu-assets", 
             Key: safeName,
             ContentType: fileType || "application/octet-stream",
-            // 🔥 FIX 2: Stops Backblaze from throwing IncompleteBody
             ContentLength: buffer.length, 
-            Body: buffer 
+            Body: fileStream // Hand the live stream to the AWS SDK
         });
         
         await s3.send(command);
