@@ -8,6 +8,9 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
+// Expand the JSON parser limit to 50MB to handle the text-encoded file
+app.use(express.json({ limit: '50mb' })); 
+
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
@@ -18,42 +21,31 @@ const s3 = new S3Client({
     }
 });
 
-app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+// The Base64 JSON Proxy Route
+app.post('/api/storage/upload-direct', async (req, res) => {
     try {
-        if (!req.body || req.body.length === 0) {
-            return res.status(400).json({ success: false, message: "Server received an empty file." });
+        const { fileName, fileType, fileData } = req.body;
+
+        if (!fileData) {
+            return res.status(400).json({ success: false, message: "No file data received." });
         }
 
-        const { fileName, fileType } = req.query;
+        // Convert the text back into a raw binary PDF buffer
+        const buffer = Buffer.from(fileData, 'base64');
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
-        const contentType = fileType || "application/octet-stream";
         
-        // 1. Ask the SDK to ONLY generate the secure URL (Do not let it upload!)
+        // AWS SDK handles simple Buffers perfectly
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: contentType
+            ContentType: fileType || "application/octet-stream",
+            Body: buffer
         });
-        const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
         
-        // 2. BYPASS THE SDK ENTIRELY. Use standard Node.js to push the raw bytes.
-        const uploadRes = await fetch(signedUploadUrl, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': contentType,
-                'Content-Length': req.body.length.toString()
-            },
-            body: req.body
-        });
-
-        if (!uploadRes.ok) {
-            const errorText = await uploadRes.text();
-            console.error("Backblaze Native Rejection:", uploadRes.status, errorText);
-            throw new Error("Native upload failed.");
-        }
+        await s3.send(command);
         
-        // 3. Generate the secure read link
+        // Generate the secure read link
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
         
@@ -63,8 +55,6 @@ app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb'
         res.status(500).json({ success: false, message: "Server upload failed." });
     }
 });
-
-app.use(express.json()); 
 
 let connectedPanels = {
     "HW_ID_BOARD_01": { school_id: "Oakridge_High_Class_A", status: "LOCKED" },
