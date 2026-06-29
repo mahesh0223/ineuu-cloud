@@ -1,6 +1,5 @@
 const express = require("express");
 const cors = require("cors");
-const https = require("https"); 
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -14,9 +13,6 @@ const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
-    // 🔥 THESE LINES STOP THE "AAAAAA==" EMPTY FILE BUG 🔥
-    requestChecksumCalculation: "WHEN_REQUIRED", 
-    responseChecksumValidation: "WHEN_REQUIRED",
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
@@ -31,43 +27,24 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             return res.status(400).json({ success: false, message: "No file data received." });
         }
 
+        // 1. Decode the Base64 text back into raw binary
         const buffer = Buffer.from(fileData, 'base64');
+        
+        // 🔥 THE MAGIC BULLET: Cast to Uint8Array to force AWS SDK to send as a single block!
+        const uint8array = new Uint8Array(buffer);
+
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
-        const contentType = fileType || "application/octet-stream";
         
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: contentType
+            ContentType: fileType || "application/octet-stream",
+            ContentLength: uint8array.length,
+            Body: uint8array 
         });
-        const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
         
-        await new Promise((resolve, reject) => {
-            const request = https.request(signedUploadUrl, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': contentType,
-                    'Content-Length': buffer.length
-                }
-            }, (response) => {
-                if (response.statusCode >= 200 && response.statusCode < 300) {
-                    resolve(); 
-                } else {
-                    // Grab the exact Backblaze rejection reason if it fails
-                    let errorBody = '';
-                    response.on('data', chunk => errorBody += chunk);
-                    response.on('end', () => {
-                        console.error("Backblaze Rejection XML:", errorBody);
-                        reject(new Error(`Backblaze rejected upload with status: ${response.statusCode}`));
-                    });
-                }
-            });
-
-            request.on('error', (err) => reject(err));
-            request.write(buffer); 
-            request.end();         
-        });
+        await s3.send(command);
         
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
@@ -75,7 +52,12 @@ app.post('/api/storage/upload-direct', async (req, res) => {
         res.json({ success: true, downloadUrl });
     } catch (error) {
         console.error("Direct Upload Failure:", error);
-        res.status(500).json({ success: false, message: "Server upload failed." });
+        // 🔥 Pipe the EXACT error directly to the dashboard so we don't have to guess!
+        res.status(500).json({ 
+            success: false, 
+            message: "Server upload failed.",
+            errorDetail: error.message || String(error)
+        });
     }
 });
 
