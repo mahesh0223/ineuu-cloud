@@ -9,40 +9,35 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ✅ The flawless Backblaze connection block with the Path-Style bypass
-// ✅ The flawless Backblaze connection block
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
-    requestChecksumCalculation: "WHEN_REQUIRED", // 👈 THIS KILLS THE 'AAAAAA==' BUG!
+    requestChecksumCalculation: "WHEN_REQUIRED", 
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
     }
 });
 
-// Mock Fleet Telemetry Dataset
 let connectedPanels = {
     "HW_ID_BOARD_01": { school_id: "Oakridge_High_Class_A", status: "LOCKED" },
     "HW_ID_BOARD_02": { school_id: "Greenwood_Academy_Lab", status: "UNLOCKED" }
 };
 
-// 1. Generate secure direct browser upload URL signatures
 app.get('/api/storage/upload-url', async (req, res) => {
     try {
-        const { fileName, fileType } = req.query;
+        const { fileName } = req.query;
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`; 
         
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
-            Key: safeName,
-            ContentType: fileType || "application/octet-stream"
+            Key: safeName
+            // 🔥 ContentType requirement REMOVED to prevent signature mismatch
         });
 
         const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
-        
         res.json({ success: true, uploadUrl: signedUrl, fileNameKey: safeName });
     } catch (error) {
         console.error("Signature Ticket Generation Failure:", error);
@@ -50,7 +45,6 @@ app.get('/api/storage/upload-url', async (req, res) => {
     }
 });
 
-// 2. Generate secure temporary private read download links
 app.get('/api/storage/download-url/:fileName', async (req, res) => {
     try {
         const { fileName } = req.params;
@@ -63,7 +57,6 @@ app.get('/api/storage/download-url/:fileName', async (req, res) => {
     }
 });
 
-// MDM Device Cluster Control Hooks
 app.get('/api/mdm/panels', (req, res) => res.json(connectedPanels));
 
 app.post('/api/mdm/command', (req, res) => {
