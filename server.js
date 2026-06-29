@@ -15,13 +15,14 @@ const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
     }
 });
 
-// The Base64 JSON Proxy Route
 app.post('/api/storage/upload-direct', async (req, res) => {
     try {
         const { fileName, fileType, fileData } = req.body;
@@ -35,17 +36,17 @@ app.post('/api/storage/upload-direct', async (req, res) => {
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
         
-        // AWS SDK handles simple Buffers perfectly
+        // AWS SDK handles simple Buffers perfectly AS LONG AS we give it the exact length
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
             ContentType: fileType || "application/octet-stream",
+            ContentLength: buffer.length, // 🔥 CRITICAL FIX RESTORED HERE
             Body: buffer
         });
         
         await s3.send(command);
         
-        // Generate the secure read link
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
         
