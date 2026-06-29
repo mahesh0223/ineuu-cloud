@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const https = require("https"); // Native Node.js module (No installation needed)
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -7,16 +8,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-
-// Expand the JSON parser limit to 50MB to handle the text-encoded file
 app.use(express.json({ limit: '50mb' })); 
 
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
-    requestChecksumCalculation: "WHEN_REQUIRED",
-    responseChecksumValidation: "WHEN_REQUIRED",
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
@@ -31,22 +28,43 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             return res.status(400).json({ success: false, message: "No file data received." });
         }
 
-        // Convert the text back into a raw binary PDF buffer
+        // 1. Decode the file
         const buffer = Buffer.from(fileData, 'base64');
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
+        const contentType = fileType || "application/octet-stream";
         
-        // AWS SDK handles simple Buffers perfectly AS LONG AS we give it the exact length
+        // 2. Ask AWS SDK ONLY to generate the URL. Do NOT let it upload.
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: fileType || "application/octet-stream",
-            ContentLength: buffer.length, // 🔥 CRITICAL FIX RESTORED HERE
-            Body: buffer
+            ContentType: contentType
+        });
+        const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
+        
+        // 3. 🔥 THE NATIVE HTTPS BYPASS 🔥
+        // This rips the AWS SDK out of the upload process and pushes the raw bytes perfectly.
+        await new Promise((resolve, reject) => {
+            const request = https.request(signedUploadUrl, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': buffer.length
+                }
+            }, (response) => {
+                if (response.statusCode >= 200 && response.statusCode < 300) {
+                    resolve(); // Success!
+                } else {
+                    reject(new Error(`Backblaze rejected upload with status: ${response.statusCode}`));
+                }
+            });
+
+            request.on('error', (err) => reject(err));
+            request.write(buffer); // Push the exact bytes
+            request.end();         // Close the connection
         });
         
-        await s3.send(command);
-        
+        // 4. Generate the secure read link
         const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
         const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
         
