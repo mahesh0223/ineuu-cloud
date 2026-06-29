@@ -10,10 +10,12 @@ app.use(cors());
 app.use(express.json());
 
 // ✅ The flawless Backblaze connection block with the Path-Style bypass
+// ✅ The flawless Backblaze connection block
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
-    forcePathStyle: true, // 👈 This stops Backblaze from rejecting the signature!
+    forcePathStyle: true, 
+    requestChecksumCalculation: "WHEN_REQUIRED", // 👈 THIS KILLS THE 'AAAAAA==' BUG!
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
