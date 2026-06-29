@@ -6,70 +6,54 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render's CORS handles the browser perfectly
 app.use(cors());
-app.use(express.json());
 
-// Comprehensive Backblaze S3 Compatibility Bridge Configuration
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
-    requestChecksumCalculation: "WHEN_REQUIRED", // Bypasses SDK checksum calculation bugs
-    responseChecksumValidation: "WHEN_REQUIRED",  // Bypasses SDK verification blocks
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
     }
 });
 
-let connectedPanels = {
-    "HW_ID_BOARD_01": { school_id: "Oakridge_High_Class_A", status: "LOCKED" },
-    "HW_ID_BOARD_02": { school_id: "Greenwood_Academy_Lab", status: "UNLOCKED" }
-};
-
-// 1. Generate secure direct browser upload URL signatures
-app.get('/api/storage/upload-url', async (req, res) => {
+// 🔥 THE NUCLEAR OPTION: Server-Side Upload Proxy
+// The browser sends the file here, and the server uploads it to Backblaze. No CORS restrictions!
+app.post('/api/storage/upload-direct', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     try {
         const { fileName, fileType } = req.query;
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
         const safeName = `asset-${Date.now()}-${cleanName}`;
         
-        // Lock down the content-type exactly once on the backend
-        const determinedContentType = fileType || "application/octet-stream";
-        
+        // The server uploads the file directly. No signatures to mismatch!
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: determinedContentType
+            ContentType: fileType || "application/octet-stream",
+            Body: req.body // The raw file data received from the browser
         });
-
-        // The math signature will now explicitly track content-type;host
-        const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
+        await s3.send(command);
         
-        res.json({ 
-            success: true, 
-            uploadUrl: signedUrl, 
-            fileNameKey: safeName,
-            contentType: determinedContentType // Return the validation string
-        });
+        // Generate the secure read link
+        const readCommand = new GetObjectCommand({ Bucket: "ineuu-assets", Key: safeName });
+        const downloadUrl = await getSignedUrl(s3, readCommand, { expiresIn: 3600 }); 
+        
+        res.json({ success: true, downloadUrl });
     } catch (error) {
-        console.error("Signature Ticket Generation Failure:", error);
-        res.status(500).json({ success: false, message: "Internal cloud server signer error" });
+        console.error("Direct Upload Failure:", error);
+        res.status(500).json({ success: false, message: "Server upload failed." });
     }
 });
 
-// 2. Generate secure temporary private read download links
-app.get('/api/storage/download-url/:fileName', async (req, res) => {
-    try {
-        const { fileName } = req.params;
-        const command = new GetObjectCommand({ Bucket: "ineuu-assets", Key: fileName });
-        const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
-        res.json({ success: true, downloadUrl: signedUrl });
-    } catch (error) {
-        console.error("Read Token Generation Error:", error);
-        res.status(500).json({ success: false, message: "Download key negotiation failure" });
-    }
-});
+// Standard JSON parser must go AFTER the raw proxy route
+app.use(express.json()); 
+
+let connectedPanels = {
+    "HW_ID_BOARD_01": { school_id: "Oakridge_High_Class_A", status: "LOCKED" },
+    "HW_ID_BOARD_02": { school_id: "Greenwood_Academy_Lab", status: "UNLOCKED" }
+};
 
 app.get('/api/mdm/panels', (req, res) => res.json(connectedPanels));
 
