@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// --- Backblaze credentials (move to env vars after this works) ---
+// --- Backblaze credentials ---
 const B2_KEY_ID = "005a1feb14f280f0000000003";
 const B2_APP_KEY = "K005DioSft/X8yJr87gDZXNNQJrd10Y";
 const B2_BUCKET_NAME = "ineuu-assets";
@@ -49,6 +49,9 @@ async function b2PostJson(fullUrl, token, payload) {
     return JSON.parse(res.body);
 }
 
+// ==========================================
+// 📦 STORAGE / UPLOAD ENDPOINT
+// ==========================================
 app.post('/api/storage/upload-direct', async (req, res) => {
     try {
         const { fileName, fileType, fileData } = req.body;
@@ -61,7 +64,6 @@ app.post('/api/storage/upload-direct', async (req, res) => {
         const safeName = `asset-${Date.now()}-${cleanName}`;
         console.log(`📦 Uploading ${safeName} | size: ${buffer.length} bytes`);
 
-        // 1) Authorize account
         const basic = Buffer.from(`${B2_KEY_ID}:${B2_APP_KEY}`).toString('base64');
         const authRes = await httpsRequest({
             hostname: 'api.backblazeb2.com',
@@ -76,9 +78,7 @@ app.post('/api/storage/upload-direct', async (req, res) => {
         const apiUrl = storageApi.apiUrl;
         const downloadUrl = storageApi.downloadUrl;
         const accountToken = auth.authorizationToken;
-        console.log("✅ authorized");
 
-        // 2) Resolve bucketId (present directly if the key is bucket-restricted)
         let bucketId = storageApi.bucketId || (auth.allowed && auth.allowed.bucketId);
         if (!bucketId) {
             const list = await b2PostJson(`${apiUrl}/b2api/v3/b2_list_buckets`, accountToken, {
@@ -88,13 +88,9 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             if (!list.buckets || !list.buckets.length) throw new Error(`Bucket "${B2_BUCKET_NAME}" not found`);
             bucketId = list.buckets[0].bucketId;
         }
-        console.log("✅ bucketId:", bucketId);
 
-        // 3) Get a one-time upload URL + token
         const up = await b2PostJson(`${apiUrl}/b2api/v3/b2_get_upload_url`, accountToken, { bucketId });
-        console.log("✅ got upload url");
 
-        // 4) Upload the raw bytes — no SigV4, no checksum middleware, no Expect header
         const sha1 = crypto.createHash('sha1').update(buffer).digest('hex');
         const upUrl = new URL(up.uploadUrl);
         const uploadRes = await httpsRequest({
@@ -110,9 +106,7 @@ app.post('/api/storage/upload-direct', async (req, res) => {
             }
         }, buffer);
         if (uploadRes.statusCode !== 200) throw new Error(`b2_upload_file [${uploadRes.statusCode}]: ${uploadRes.body}`);
-        console.log("✅ file stored");
 
-        // 5) Temporary signed download link (bucket is private)
         const dl = await b2PostJson(`${apiUrl}/b2api/v3/b2_get_download_authorization`, accountToken, {
             bucketId,
             fileNamePrefix: safeName,
@@ -132,21 +126,113 @@ app.post('/api/storage/upload-direct', async (req, res) => {
     }
 });
 
-let connectedPanels = {
-    "HW_ID_BOARD_01": { school_id: "Oakridge_High_Class_A", status: "LOCKED" },
-    "HW_ID_BOARD_02": { school_id: "Greenwood_Academy_Lab", status: "UNLOCKED" }
-};
+// ==========================================
+// 📱 DYNAMIC LIVE DEVICE MANAGEMENT (MDM)
+// ==========================================
 
-app.get('/api/mdm/panels', (req, res) => res.json(connectedPanels));
+// ZERO DUMMY PANELS. Devices fill this object live when they check in.
+let connectedPanels = {};
 
-app.post('/api/mdm/command', (req, res) => {
-    const { target_hardware_id, action } = req.body;
-    if (connectedPanels[target_hardware_id]) {
-        connectedPanels[target_hardware_id].status = action === "LOCK" ? "LOCKED" : "UNLOCKED";
-        res.json({ success: true, message: `Command transmitted.` });
-    } else {
-        res.status(404).json({ success: false, message: "Device offline." });
+/**
+ * 1. HEARTBEAT / REGISTRATION ENDPOINT (For the APK / Phone app)
+ * Your Android APK/Phone app should POST to this every 3–5 seconds.
+ * * Payload from APK: { "hardware_id": "UNIQUE_DEVICE_ID", "school_id": "Room_404_IFPD" }
+ */
+app.post('/api/mdm/panel/heartbeat', (req, res) => {
+    const { hardware_id, school_id } = req.body;
+
+    if (!hardware_id) {
+        return res.status(400).json({ success: false, message: "Missing hardware_id" });
     }
+
+    // If the device is checking in for the first time, register it globally
+    if (!connectedPanels[hardware_id]) {
+        console.log(`✨ New Device Registered Live: ${hardware_id}`);
+        connectedPanels[hardware_id] = {
+            school_id: school_id || "Unassigned Device",
+            status: "UNLOCKED",
+            pendingAnnouncement: null,
+            clearCanvasTriggered: false,
+            lastSeen: Date.now()
+        };
+    } else {
+        // Just update timestamp and school_id label if it changed
+        connectedPanels[hardware_id].lastSeen = Date.now();
+        if (school_id) connectedPanels[hardware_id].school_id = school_id;
+    }
+
+    // Immediately reply to the APK with any commands queued by the dashboard admin
+    res.json({
+        success: true,
+        status: connectedPanels[hardware_id].status,
+        pendingAnnouncement: connectedPanels[hardware_id].pendingAnnouncement,
+        clearCanvasTriggered: connectedPanels[hardware_id].clearCanvasTriggered
+    });
 });
 
-app.listen(PORT, () => console.log(`🚀 Native B2 server online on port ${PORT}`));
+/**
+ * 2. ACKNOWLEDGE COMMAND ENDPOINT (For the APK)
+ * Once the APK reads an announcement or clears its canvas, it calls this to tell the server "I did it, clear the flag".
+ */
+app.post('/api/mdm/panel/acknowledge', (req, res) => {
+    const { hardware_id, clearedAnnouncement, clearedCanvas } = req.body;
+    
+    if (connectedPanels[hardware_id]) {
+        if (clearedAnnouncement) connectedPanels[hardware_id].pendingAnnouncement = null;
+        if (clearedCanvas) connectedPanels[hardware_id].clearCanvasTriggered = false;
+        return res.json({ success: true, message: "State cleared on server." });
+    }
+    res.status(404).json({ success: false, message: "Device profile not found." });
+});
+
+/**
+ * 3. DASHBOARD GET DEVICES ENDPOINT
+ * Dashboard calls this via GET to render the online cards.
+ */
+app.get('/api/mdm/panels', (req, res) => {
+    // Optional: Auto-remove devices that haven't sent a heartbeat in over 20 seconds (offline)
+    const now = Date.now();
+    Object.keys(connectedPanels).forEach(id => {
+        if (now - connectedPanels[id].lastSeen > 20000) {
+            console.log(`💀 Device disconnected (Timeout): ${id}`);
+            delete connectedPanels[id];
+        }
+    });
+
+    res.json(connectedPanels);
+});
+
+/**
+ * 4. DASHBOARD SEND COMMAND ENDPOINT
+ * Control panel uses this to assign orders to the live devices.
+ */
+app.post('/api/mdm/command', (req, res) => {
+    const { target_hardware_id, action, message } = req.body;
+    
+    if (!connectedPanels[target_hardware_id]) {
+        return res.status(404).json({ success: false, message: "Device is offline or not registered." });
+    }
+
+    const panel = connectedPanels[target_hardware_id];
+
+    switch (action) {
+        case "LOCK":
+            panel.status = "LOCKED";
+            break;
+        case "UNLOCK":
+            panel.status = "UNLOCKED";
+            break;
+        case "ANNOUNCEMENT":
+            panel.pendingAnnouncement = message || "Attention: Administrative broadcast.";
+            break;
+        case "CLEAR_CANVAS":
+            panel.clearCanvasTriggered = true;
+            break;
+        default:
+            return res.status(400).json({ success: false, message: "Invalid action." });
+    }
+
+    res.json({ success: true, message: `Command [${action}] sent. waiting for device synchronization.` });
+});
+
+app.listen(PORT, () => console.log(`🚀 Live Device Matrix Suite online on port ${PORT}`));
