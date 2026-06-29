@@ -9,12 +9,13 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Cloud Storage Initialization with Path-Style and Checksum Bypasses
+// Comprehensive Backblaze S3 Compatibility Bridge Configuration
 const s3 = new S3Client({
     region: "us-east-005", 
     endpoint: "https://s3.us-east-005.backblazeb2.com", 
     forcePathStyle: true, 
-    requestChecksumCalculation: "WHEN_REQUIRED", 
+    requestChecksumCalculation: "WHEN_REQUIRED", // Bypasses SDK checksum calculation bugs
+    responseChecksumValidation: "WHEN_REQUIRED",  // Bypasses SDK verification blocks
     credentials: {
         accessKeyId: "005a1feb14f280f0000000002",         
         secretAccessKey: "K0053/IZi6tKktciH/D/nJlbKiPw9oU", 
@@ -31,16 +32,26 @@ app.get('/api/storage/upload-url', async (req, res) => {
     try {
         const { fileName, fileType } = req.query;
         const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
-        const safeName = `asset-${Date.now()}-${cleanName}`; 
+        const safeName = `asset-${Date.now()}-${cleanName}`;
+        
+        // Lock down the content-type exactly once on the backend
+        const determinedContentType = fileType || "application/octet-stream";
         
         const command = new PutObjectCommand({
             Bucket: "ineuu-assets", 
             Key: safeName,
-            ContentType: fileType || "application/octet-stream" // 🔥 Required for signature match
+            ContentType: determinedContentType
         });
 
+        // The math signature will now explicitly track content-type;host
         const signedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); 
-        res.json({ success: true, uploadUrl: signedUrl, fileNameKey: safeName });
+        
+        res.json({ 
+            success: true, 
+            uploadUrl: signedUrl, 
+            fileNameKey: safeName,
+            contentType: determinedContentType // Return the validation string
+        });
     } catch (error) {
         console.error("Signature Ticket Generation Failure:", error);
         res.status(500).json({ success: false, message: "Internal cloud server signer error" });
@@ -60,7 +71,6 @@ app.get('/api/storage/download-url/:fileName', async (req, res) => {
     }
 });
 
-// MDM Device Cluster Control Hooks
 app.get('/api/mdm/panels', (req, res) => res.json(connectedPanels));
 
 app.post('/api/mdm/command', (req, res) => {
