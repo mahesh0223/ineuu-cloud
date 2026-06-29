@@ -142,23 +142,60 @@ let connectedPanels = {};
 io.on('connection', (socket) => {
     console.log(`🔌 Incoming Socket connection: ${socket.id}`);
 
-    // 1. Android APK sends this event on connection
+    // 1. Android APK sends this event on connection (Now includes Telemetry)
     socket.on('register_panel', (data) => {
-        const { hardware_id, school_id } = data;
+        const { hardware_id, school_id, telemetry } = data;
         
         if (!hardware_id) return;
 
-        // Map the hardware ID to the specific WebSocket connection
+        // Map the hardware ID to the specific WebSocket connection and inject telemetry
         connectedPanels[hardware_id] = {
             school_id: school_id || "Unassigned Device",
             socket_id: socket.id,
-            status: "ONLINE",
+            status: connectedPanels[hardware_id]?.status || "ONLINE",
+            telemetry: telemetry || { cpuTemp: "N/A", storage: "N/A", wifi: "N/A" },
             lastSeen: Date.now()
         };
-        console.log(`✨ Panel Registered Live: ${hardware_id}`);
+        console.log(`✨ Panel Registered Live: ${hardware_id} with Telemetry`);
     });
 
-    // 2. Automatically clean up when an Android panel goes offline (app closed/wifi dropped)
+    // 2. Android device periodically updates its health status metrics
+    socket.on('telemetry_update', (data) => {
+        const { hardware_id, telemetry } = data;
+        if (connectedPanels[hardware_id]) {
+            connectedPanels[hardware_id].telemetry = telemetry;
+            connectedPanels[hardware_id].lastSeen = Date.now();
+        }
+    });
+
+    // ==========================================
+    // 📺 WEBRTC SCREEN CASTING SIGNALING ROUTES
+    // ==========================================
+    
+    // 3. Teacher's laptop requests to stream to a specific board id
+    socket.on('request_cast', (data) => {
+        const { target_hardware_id, offer } = data;
+        const panel = connectedPanels[target_hardware_id];
+        if (panel) {
+            io.to(panel.socket_id).emit('incoming_cast_offer', {
+                sender_socket_id: socket.id,
+                offer: offer
+            });
+        }
+    });
+
+    // 4. Android board accepts screen cast and returns its WebRTC answer string
+    socket.on('answer_cast', (data) => {
+        const { target_sender_id, answer } = data;
+        io.to(target_sender_id).emit('cast_answered', { answer: answer });
+    });
+
+    // 5. Network topology routing optimization exchange (ICE Candidates)
+    socket.on('ice_candidate', (data) => {
+        io.to(data.target_id).emit('ice_candidate', { candidate: data.candidate });
+    });
+
+    // 6. Automatically clean up when an Android panel goes offline (app closed/wifi dropped)
     socket.on('disconnect', () => {
         for (const [hwId, panelData] of Object.entries(connectedPanels)) {
             if (panelData.socket_id === socket.id) {
@@ -171,7 +208,7 @@ io.on('connection', (socket) => {
 });
 
 /**
- * 3. DASHBOARD GET DEVICES ENDPOINT
+ * 7. DASHBOARD GET DEVICES ENDPOINT
  * Dashboard calls this via HTTP GET to render the online cards.
  */
 app.get('/api/mdm/panels', (req, res) => {
@@ -179,7 +216,7 @@ app.get('/api/mdm/panels', (req, res) => {
 });
 
 /**
- * 4. DASHBOARD SEND COMMAND ENDPOINT
+ * 8. DASHBOARD SEND COMMAND ENDPOINT
  * Control panel uses this to assign orders. We pipe it straight into the WebSocket.
  */
 app.post('/api/mdm/command', (req, res) => {
