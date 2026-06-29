@@ -6,12 +6,18 @@ const express = require("express");
 const cors = require("cors");
 const https = require("https");
 const crypto = require("crypto");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// 🌐 Create standard HTTP server and wrap it with Socket.IO
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
 // --- Backblaze credentials ---
 const B2_KEY_ID = "005a1feb14f280f0000000003";
@@ -50,7 +56,7 @@ async function b2PostJson(fullUrl, token, payload) {
 }
 
 // ==========================================
-// 📦 STORAGE / UPLOAD ENDPOINT
+// 📦 STORAGE / UPLOAD ENDPOINT (Native B2)
 // ==========================================
 app.post('/api/storage/upload-direct', async (req, res) => {
     try {
@@ -127,84 +133,54 @@ app.post('/api/storage/upload-direct', async (req, res) => {
 });
 
 // ==========================================
-// 📱 DYNAMIC LIVE DEVICE MANAGEMENT (MDM)
+// 📱 WEB-SOCKET LIVE DEVICE MANAGEMENT (MDM)
 // ==========================================
 
-// ZERO DUMMY PANELS. Devices fill this object live when they check in.
+// ZERO DUMMY PANELS. Devices register here instantly via WebSockets.
 let connectedPanels = {};
 
-/**
- * 1. HEARTBEAT / REGISTRATION ENDPOINT (For the APK / Phone app)
- * Your Android APK/Phone app should POST to this every 3–5 seconds.
- * * Payload from APK: { "hardware_id": "UNIQUE_DEVICE_ID", "school_id": "Room_404_IFPD" }
- */
-app.post('/api/mdm/panel/heartbeat', (req, res) => {
-    const { hardware_id, school_id } = req.body;
+io.on('connection', (socket) => {
+    console.log(`🔌 Incoming Socket connection: ${socket.id}`);
 
-    if (!hardware_id) {
-        return res.status(400).json({ success: false, message: "Missing hardware_id" });
-    }
+    // 1. Android APK sends this event on connection
+    socket.on('register_panel', (data) => {
+        const { hardware_id, school_id } = data;
+        
+        if (!hardware_id) return;
 
-    // If the device is checking in for the first time, register it globally
-    if (!connectedPanels[hardware_id]) {
-        console.log(`✨ New Device Registered Live: ${hardware_id}`);
+        // Map the hardware ID to the specific WebSocket connection
         connectedPanels[hardware_id] = {
             school_id: school_id || "Unassigned Device",
-            status: "UNLOCKED",
-            pendingAnnouncement: null,
-            clearCanvasTriggered: false,
+            socket_id: socket.id,
+            status: "ONLINE",
             lastSeen: Date.now()
         };
-    } else {
-        // Just update timestamp and school_id label if it changed
-        connectedPanels[hardware_id].lastSeen = Date.now();
-        if (school_id) connectedPanels[hardware_id].school_id = school_id;
-    }
-
-    // Immediately reply to the APK with any commands queued by the dashboard admin
-    res.json({
-        success: true,
-        status: connectedPanels[hardware_id].status,
-        pendingAnnouncement: connectedPanels[hardware_id].pendingAnnouncement,
-        clearCanvasTriggered: connectedPanels[hardware_id].clearCanvasTriggered
+        console.log(`✨ Panel Registered Live: ${hardware_id}`);
     });
-});
 
-/**
- * 2. ACKNOWLEDGE COMMAND ENDPOINT (For the APK)
- * Once the APK reads an announcement or clears its canvas, it calls this to tell the server "I did it, clear the flag".
- */
-app.post('/api/mdm/panel/acknowledge', (req, res) => {
-    const { hardware_id, clearedAnnouncement, clearedCanvas } = req.body;
-    
-    if (connectedPanels[hardware_id]) {
-        if (clearedAnnouncement) connectedPanels[hardware_id].pendingAnnouncement = null;
-        if (clearedCanvas) connectedPanels[hardware_id].clearCanvasTriggered = false;
-        return res.json({ success: true, message: "State cleared on server." });
-    }
-    res.status(404).json({ success: false, message: "Device profile not found." });
+    // 2. Automatically clean up when an Android panel goes offline (app closed/wifi dropped)
+    socket.on('disconnect', () => {
+        for (const [hwId, panelData] of Object.entries(connectedPanels)) {
+            if (panelData.socket_id === socket.id) {
+                console.log(`💀 Panel Disconnected: ${hwId}`);
+                delete connectedPanels[hwId]; // Remove from dashboard instantly
+                break;
+            }
+        }
+    });
 });
 
 /**
  * 3. DASHBOARD GET DEVICES ENDPOINT
- * Dashboard calls this via GET to render the online cards.
+ * Dashboard calls this via HTTP GET to render the online cards.
  */
 app.get('/api/mdm/panels', (req, res) => {
-    // Optional: Auto-remove devices that haven't sent a heartbeat in over 20 seconds (offline)
-    const now = Date.now();
-    Object.keys(connectedPanels).forEach(id => {
-        if (now - connectedPanels[id].lastSeen > 20000) {
-            console.log(`💀 Device disconnected (Timeout): ${id}`);
-            delete connectedPanels[id];
-        }
-    });
-
     res.json(connectedPanels);
 });
 
 /**
  * 4. DASHBOARD SEND COMMAND ENDPOINT
- * Control panel uses this to assign orders to the live devices.
+ * Control panel uses this to assign orders. We pipe it straight into the WebSocket.
  */
 app.post('/api/mdm/command', (req, res) => {
     const { target_hardware_id, action, message } = req.body;
@@ -213,26 +189,22 @@ app.post('/api/mdm/command', (req, res) => {
         return res.status(404).json({ success: false, message: "Device is offline or not registered." });
     }
 
-    const panel = connectedPanels[target_hardware_id];
+    const panelSocketId = connectedPanels[target_hardware_id].socket_id;
 
-    switch (action) {
-        case "LOCK":
-            panel.status = "LOCKED";
-            break;
-        case "UNLOCK":
-            panel.status = "UNLOCKED";
-            break;
-        case "ANNOUNCEMENT":
-            panel.pendingAnnouncement = message || "Attention: Administrative broadcast.";
-            break;
-        case "CLEAR_CANVAS":
-            panel.clearCanvasTriggered = true;
-            break;
-        default:
-            return res.status(400).json({ success: false, message: "Invalid action." });
-    }
+    // Send the command directly down the live socket connection to that specific board
+    io.to(panelSocketId).emit('mdm_execute', {
+        action: action,
+        message: message,
+        payload: { text: message } 
+    });
 
-    res.json({ success: true, message: `Command [${action}] sent. waiting for device synchronization.` });
+    // Update the server's local state for the dashboard UI
+    if (action === "LOCK") connectedPanels[target_hardware_id].status = "LOCKED";
+    if (action === "UNLOCK") connectedPanels[target_hardware_id].status = "ONLINE";
+
+    console.log(`🚀 Sent ${action} to ${target_hardware_id}`);
+    res.json({ success: true, message: `Command [${action}] transmitted securely to device.` });
 });
 
-app.listen(PORT, () => console.log(`🚀 Live Device Matrix Suite online on port ${PORT}`));
+// 🔥 MUST USE server.listen INSTEAD OF app.listen FOR WEBSOCKETS TO BIND!
+server.listen(PORT, () => console.log(`🚀 Native B2 + WebSockets Server online on port ${PORT}`));
