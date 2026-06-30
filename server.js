@@ -260,6 +260,39 @@ io.on('connection', (socket) => {
         }
     });
 
+    // ==========================================================
+    // 📺 WEBRTC WIRELESS SCREEN MIRRORING SIGNALING RELAYS
+    // ==========================================================
+    socket.on('request_cast', (data) => {
+        const { target_hardware_id, offer } = data;
+        const panel = connectedPanels[target_hardware_id];
+        if (panel) {
+            console.log(`📺 Relaying WebRTC Screen Offer from Laptop [${socket.id}] to Board Socket [${panel.socket_id}]`);
+            io.to(panel.socket_id).emit('incoming_cast_offer', {
+                sender_socket_id: socket.id,
+                offer: offer
+            });
+        } else {
+            console.log(`❌ Cast failed: Target Board [${target_hardware_id}] is currently offline.`);
+        }
+    });
+
+    socket.on('answer_cast', (data) => {
+        const { target_sender_id, answer } = data;
+        console.log(`📺 Relaying WebRTC Accept Answer back to Laptop Dashboard [${target_sender_id}]`);
+        io.to(target_sender_id).emit('cast_answered', { answer: answer });
+    });
+
+    socket.on('ice_candidate', (data) => {
+        const { target_id, candidate } = data;
+        const panel = connectedPanels[target_id];
+        if (panel) {
+            io.to(panel.socket_id).emit('incoming_ice_candidate', { candidate: candidate });
+        } else {
+            io.to(target_id).emit('incoming_ice_candidate', { candidate: candidate });
+        }
+    });
+
     socket.on('disconnect', () => {
         for (const id in connectedPanels) {
             if (connectedPanels[id].socket_id === socket.id) {
