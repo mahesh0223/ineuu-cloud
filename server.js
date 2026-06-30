@@ -87,6 +87,13 @@ app.post('/api/mdm/activate', (req, res) => {
     }
 
     const cleanKey = licenseKey.toUpperCase().trim();
+    
+    // MASTER KEY BYPASS (Survives Render reboots/wipes)
+    if (cleanKey === "INEUU-MASTER-2026") {
+        console.log(`🔐 MASTER KEY USED! Board activated! Hardware ID: ${hardwareId}`);
+        return res.json({ success: true, message: "Master license validated successfully." });
+    }
+
     const keyRecord = validLicenseKeys[cleanKey];
 
     if (!keyRecord) {
@@ -178,20 +185,38 @@ app.get('/api/storage/library', async (req, res) => {
 // ==========================================
 app.post('/api/mdm/command', (req, res) => {
     const { hardware_id, action, text } = req.body;
-    console.log(`📡 Broadcast Request Received -> Target ID: ${hardware_id || 'ALL'}, Action: ${action}`);
 
-    if (hardware_id) {
-        const panel = connectedPanels[hardware_id];
-        if (panel) {
-            io.to(panel.socket_id).emit('mdm_execute', { action, text });
-            if (action === "OTA_UPDATE") panel.status = "UPDATING SYSTEM...";
-            return res.json({ success: true, message: `Dispatched ${action} successfully to targeted screen layout context.` });
-        }
-        return res.status(404).json({ success: false, message: "Target terminal array hardware matrix currently unmapped." });
-    } else {
-        io.emit('mdm_execute', { action, text });
-        return res.json({ success: true, message: `Dispatched broad command sequence array globally.` });
+    if (!hardware_id || !action) {
+        return res.status(400).json({ success: false, error: "Missing hardware_id or action command." });
     }
+
+    console.log(`📡 Dashboard triggered command: [${action}] for Device: [${hardware_id}]`);
+
+    let targetSocketId = null;
+    
+    // Look up socket mapping from the connectedPanels dictionary
+    if (connectedPanels && connectedPanels[hardware_id]) {
+        targetSocketId = connectedPanels[hardware_id].socket_id;
+    }
+
+    // Prepare payload exactly matching MdmFleetService.kt expectations
+    const payload = {
+        action: action,
+        message: text || "",
+        text: text || ""
+    };
+
+    if (targetSocketId) {
+        // Direct targeting via specific socket ID mapping
+        io.to(targetSocketId).emit('mdm_execute', payload);
+        console.log(`➡️ Command pushed to specific socket channel: ${targetSocketId}`);
+    } else {
+        // Broadcast room backup if explicit mapping isn't found
+        io.emit('mdm_execute', payload); 
+        console.log(`📢 Command broadcasted widely across network channels.`);
+    }
+
+    return res.json({ success: true, message: "Command dispatched successfully." });
 });
 
 app.get('/api/mdm/devices', (req, res) => {
