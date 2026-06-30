@@ -1,247 +1,301 @@
-// Disable Node 24 "Happy Eyeballs" — fixed the connect timeouts to B2 earlier
-const net = require("net");
-net.setDefaultAutoSelectFamily(false);
-
-const express = require("express");
-const cors = require("cors");
-const https = require("https");
-const crypto = require("crypto");
-const http = require("http");
-const { Server } = require("socket.io");
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const fs = require('fs');
+const crypto = require('crypto');
+const https = require('https');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json());
 
-// 🌐 Create standard HTTP server and wrap it with Socket.IO
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-
-// --- Backblaze credentials ---
-const B2_KEY_ID = "005a1feb14f280f0000000003";
-const B2_APP_KEY = "K005DioSft/X8yJr87gDZXNNQJrd10Y";
-const B2_BUCKET_NAME = "ineuu-assets";
-
-// --- Small https helper: resolves { statusCode, body } for any request ---
-function httpsRequest(options, body) {
-    return new Promise((resolve, reject) => {
-        const req = https.request(options, (res) => {
-            let data = '';
-            res.on('data', c => data += c);
-            res.on('end', () => resolve({ statusCode: res.statusCode, body: data }));
-        });
-        req.on('error', reject);
-        if (body) req.write(body);
-        req.end();
-    });
-}
-
-async function b2PostJson(fullUrl, token, payload) {
-    const u = new URL(fullUrl);
-    const body = JSON.stringify(payload);
-    const res = await httpsRequest({
-        hostname: u.hostname,
-        path: u.pathname,
-        method: 'POST',
-        headers: {
-            Authorization: token,
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body)
-        }
-    }, body);
-    if (res.statusCode !== 200) throw new Error(`B2 ${u.pathname} [${res.statusCode}]: ${res.body}`);
-    return JSON.parse(res.body);
-}
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
 
 // ==========================================
-// 📦 STORAGE / UPLOAD ENDPOINT (Native B2)
+// ⚙️ CLOUD ENVIRONMENT CONFIGURATION
 // ==========================================
-app.post('/api/storage/upload-direct', async (req, res) => {
+const PORT = process.env.PORT || 3000;
+const B2_KEY_ID = process.env.B2_KEY_ID || "YOUR_B2_KEY_ID";
+const B2_APP_KEY = process.env.B2_APP_KEY || "YOUR_B2_APP_KEY";
+const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME || "ineuu-assets";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "INEUU_MASTER_ADMIN_2026";
+
+// Live runtime cache for connected screens
+let connectedPanels = {};
+
+// ==========================================
+// 🔑 ENTERPRISE KEY GENERATOR & DATABASE
+// ==========================================
+const KEYS_FILE = './license_keys.json';
+let validLicenseKeys = {};
+
+// Self-healing database load
+if (fs.existsSync(KEYS_FILE)) {
     try {
-        const { fileName, fileType, fileData } = req.body;
-        if (!fileData) {
-            return res.status(400).json({ success: false, message: "No file data received." });
-        }
+        validLicenseKeys = JSON.parse(fs.readFileSync(KEYS_FILE));
+    } catch (e) {
+        console.error("⚠️ Failed to parse keys file, resetting...", e);
+        validLicenseKeys = {};
+    }
+} else {
+    fs.writeFileSync(KEYS_FILE, JSON.stringify({}));
+}
 
-        const buffer = Buffer.from(fileData, 'base64');
-        const cleanName = (fileName || 'file').replace(/[^a-zA-Z0-9.-]/g, "_");
-        const safeName = `asset-${Date.now()}-${cleanName}`;
-        console.log(`📦 Uploading ${safeName} | size: ${buffer.length} bytes`);
+// 🛠️ ADMIN API: Dynamic Key Generator
+app.post('/api/admin/generate-keys', (req, res) => {
+    const { count, adminPassword } = req.body;
 
+    if (adminPassword !== ADMIN_PASSWORD) {
+        return res.status(403).json({ success: false, message: "Unauthorized Admin Password." });
+    }
+
+    const newKeys = [];
+    const numToGenerate = count || 10;
+
+    for (let i = 0; i < numToGenerate; i++) {
+        const chunk1 = crypto.randomBytes(2).toString('hex').toUpperCase();
+        const chunk2 = crypto.randomBytes(2).toString('hex').toUpperCase();
+        const chunk3 = crypto.randomBytes(2).toString('hex').toUpperCase();
+        const newKey = `INEUU-${chunk1}-${chunk2}-${chunk3}`;
+        
+        validLicenseKeys[newKey] = { 
+            isUsed: false, 
+            linkedDevice: null, 
+            createdAt: new Date().toISOString() 
+        };
+        newKeys.push(newKey);
+    }
+
+    fs.writeFileSync(KEYS_FILE, JSON.stringify(validLicenseKeys, null, 2));
+    console.log(`🛠️ Admin generated ${numToGenerate} new license keys.`);
+    res.json({ success: true, generatedKeys: newKeys });
+});
+
+// 📺 IFPD API: Hardware Activation Router
+app.post('/api/mdm/activate', (req, res) => {
+    const { licenseKey, hardwareId } = req.body;
+
+    if (!licenseKey || !hardwareId) {
+        return res.status(400).json({ success: false, reason: "Missing key or device configuration data." });
+    }
+
+    const cleanKey = licenseKey.toUpperCase().trim();
+    const keyRecord = validLicenseKeys[cleanKey];
+
+    if (!keyRecord) {
+        return res.status(401).json({ success: false, reason: "Invalid software activation key." });
+    }
+
+    if (keyRecord.isUsed && keyRecord.linkedDevice !== hardwareId) {
+        return res.status(403).json({ success: false, reason: "License key is already claimed by a different IFPD." });
+    }
+
+    keyRecord.isUsed = true;
+    keyRecord.linkedDevice = hardwareId;
+    keyRecord.activatedAt = new Date().toISOString();
+    
+    fs.writeFileSync(KEYS_FILE, JSON.stringify(validLicenseKeys, null, 2));
+
+    console.log(`🔐 Board verified! Hardware ID: ${hardwareId} bound permanently to Key: ${cleanKey}`);
+    return res.json({ success: true, message: "Device license validated successfully." });
+});
+
+// ==========================================
+// 📚 PRIVATE B2 CURRICULUM FILE AUTO-INDEXER
+// ==========================================
+app.get('/api/storage/library', async (req, res) => {
+    try {
+        console.log("📚 Processing cloud library tree index optimization request...");
         const basic = Buffer.from(`${B2_KEY_ID}:${B2_APP_KEY}`).toString('base64');
+        
         const authRes = await httpsRequest({
             hostname: 'api.backblazeb2.com',
             path: '/b2api/v3/b2_authorize_account',
             method: 'GET',
             headers: { Authorization: `Basic ${basic}` }
         });
-        if (authRes.statusCode !== 200) throw new Error(`b2_authorize_account [${authRes.statusCode}]: ${authRes.body}`);
+        
+        if (authRes.statusCode !== 200) throw new Error("Backblaze Auth Engine Refused Session");
         const auth = JSON.parse(authRes.body);
 
-        const storageApi = (auth.apiInfo && auth.apiInfo.storageApi) || auth;
-        const apiUrl = storageApi.apiUrl;
-        const downloadUrl = storageApi.downloadUrl;
+        const apiUrl = auth.apiInfo.storageApi.apiUrl;
+        const downloadUrl = auth.apiInfo.storageApi.downloadUrl;
         const accountToken = auth.authorizationToken;
+        const bucketId = auth.apiInfo.storageApi.bucketId;
 
-        let bucketId = storageApi.bucketId || (auth.allowed && auth.allowed.bucketId);
-        if (!bucketId) {
-            const list = await b2PostJson(`${apiUrl}/b2api/v3/b2_list_buckets`, accountToken, {
-                accountId: auth.accountId,
-                bucketName: B2_BUCKET_NAME
-            });
-            if (!list.buckets || !list.buckets.length) throw new Error(`Bucket "${B2_BUCKET_NAME}" not found`);
-            bucketId = list.buckets[0].bucketId;
-        }
+        const listRes = await b2PostJson(`${apiUrl}/b2api/v3/b2_list_file_names`, accountToken, {
+            bucketId: bucketId,
+            maxFileCount: 1000,
+            prefix: "NCERT/"
+        });
 
-        const up = await b2PostJson(`${apiUrl}/b2api/v3/b2_get_upload_url`, accountToken, { bucketId });
+        const dlAuthRes = await b2PostJson(`${apiUrl}/b2api/v3/b2_get_download_authorization`, accountToken, {
+            bucketId: bucketId,
+            fileNamePrefix: "NCERT/",
+            validDurationInSeconds: 86400 
+        });
+        const secureToken = dlAuthRes.authorizationToken;
 
-        const sha1 = crypto.createHash('sha1').update(buffer).digest('hex');
-        const upUrl = new URL(up.uploadUrl);
-        const uploadRes = await httpsRequest({
-            hostname: upUrl.hostname,
-            path: upUrl.pathname + upUrl.search,
-            method: 'POST',
-            headers: {
-                Authorization: up.authorizationToken,
-                'X-Bz-File-Name': encodeURIComponent(safeName),
-                'Content-Type': fileType || 'application/octet-stream',
-                'Content-Length': buffer.length,
-                'X-Bz-Content-Sha1': sha1
+        let catalog = {};
+
+        listRes.files.forEach(file => {
+            const parts = file.fileName.split('/');
+            if (parts.length >= 4) {
+                const className = parts[1]; 
+                const subject = parts[2];   
+                const rawName = parts[3];   
+                
+                const type = rawName.toLowerCase().endsWith('.glb') ? '3d' : 'pdf';
+                const cleanName = rawName.replace('.pdf', '').replace('.glb', '').replace(/_/g, ' ');
+
+                if (!catalog[className]) catalog[className] = {};
+                if (!catalog[className][subject]) catalog[className][subject] = [];
+
+                catalog[className][subject].push({
+                    name: cleanName,
+                    type: type,
+                    url: `${downloadUrl}/file/${B2_BUCKET_NAME}/${encodeURIComponent(file.fileName)}?Authorization=${secureToken}`
+                });
             }
-        }, buffer);
-        if (uploadRes.statusCode !== 200) throw new Error(`b2_upload_file [${uploadRes.statusCode}]: ${uploadRes.body}`);
-
-        const dl = await b2PostJson(`${apiUrl}/b2api/v3/b2_get_download_authorization`, accountToken, {
-            bucketId,
-            fileNamePrefix: safeName,
-            validDurationInSeconds: 3600
         });
-        const link = `${downloadUrl}/file/${B2_BUCKET_NAME}/${encodeURIComponent(safeName)}?Authorization=${dl.authorizationToken}`;
 
-        console.log(`✅ DONE: ${safeName}`);
-        res.json({ success: true, downloadUrl: link });
+        res.json({ success: true, library: catalog });
     } catch (error) {
-        console.error("Direct Upload Failure:", error);
-        res.status(500).json({
-            success: false,
-            message: "Server upload failed.",
-            errorDetail: error.message || String(error)
-        });
+        console.error("❌ Cloud Library Indexing Failure:", error);
+        res.status(500).json({ success: false, message: "Internal Engine could not resolve assets storage bucket map." });
     }
 });
 
 // ==========================================
-// 📱 WEB-SOCKET LIVE DEVICE MANAGEMENT (MDM)
+// 🚀 FLEET MDM COMMAND CENTER & SOCKET HUB
 // ==========================================
+app.post('/api/mdm/command', (req, res) => {
+    const { hardware_id, action, text } = req.body;
+    console.log(`📡 Broadcast Request Received -> Target ID: ${hardware_id || 'ALL'}, Action: ${action}`);
 
-// ZERO DUMMY PANELS. Devices register here instantly via WebSockets.
-let connectedPanels = {};
+    if (hardware_id) {
+        const panel = connectedPanels[hardware_id];
+        if (panel) {
+            io.to(panel.socket_id).emit('mdm_execute', { action, text });
+            if (action === "OTA_UPDATE") panel.status = "UPDATING SYSTEM...";
+            return res.json({ success: true, message: `Dispatched ${action} successfully to targeted screen layout context.` });
+        }
+        return res.status(404).json({ success: false, message: "Target terminal array hardware matrix currently unmapped." });
+    } else {
+        io.emit('mdm_execute', { action, text });
+        return res.json({ success: true, message: `Dispatched broad command sequence array globally.` });
+    }
+});
+
+app.get('/api/mdm/devices', (req, res) => {
+    res.json(Object.values(connectedPanels));
+});
 
 io.on('connection', (socket) => {
-    console.log(`🔌 Incoming Socket connection: ${socket.id}`);
+    console.log(`🔌 Native Socket Handshake Initialized: ${socket.id}`);
 
-    // 1. Android APK sends this event on connection (Now includes Telemetry)
     socket.on('register_panel', (data) => {
-        const { hardware_id, school_id, telemetry } = data;
-        
-        if (!hardware_id) return;
-
-        // Map the hardware ID to the specific WebSocket connection and inject telemetry
+        const { hardware_id, school_id } = data;
         connectedPanels[hardware_id] = {
-            school_id: school_id || "Unassigned Device",
+            school_id: school_id || "INEUU_Board_" + hardware_id,
             socket_id: socket.id,
-            status: connectedPanels[hardware_id]?.status || "ONLINE",
-            telemetry: telemetry || { cpuTemp: "N/A", storage: "N/A", wifi: "N/A" },
+            status: "ONLINE",
+            telemetry: { cpuTemp: "⚡", storage: "Reading...", wifi: "Connected" },
             lastSeen: Date.now()
         };
-        console.log(`✨ Panel Registered Live: ${hardware_id} with Telemetry`);
+        console.log(`🖥️ Screen Terminal Authenticated and Cataloged: ${hardware_id}`);
     });
 
-    // 2. Android device periodically updates its health status metrics
     socket.on('telemetry_update', (data) => {
         const { hardware_id, telemetry } = data;
+        
         if (connectedPanels[hardware_id]) {
             connectedPanels[hardware_id].telemetry = telemetry;
             connectedPanels[hardware_id].lastSeen = Date.now();
+            if (connectedPanels[hardware_id].status === "OFFLINE") {
+                connectedPanels[hardware_id].status = "ONLINE";
+            }
+        } else {
+            // 🔥 THE RENDER REBOOT AMNESIA PROTECTION PATCH 🔥
+            connectedPanels[hardware_id] = {
+                school_id: "INEUU_Board_" + hardware_id,
+                socket_id: socket.id,
+                status: "ONLINE",
+                telemetry: telemetry || { cpuTemp: "N/A", storage: "N/A", wifi: "N/A" },
+                lastSeen: Date.now()
+            };
+            console.log(`♻️ Cluster memory self-healed. Restored Active Panel Node: ${hardware_id}`);
         }
     });
 
-    // ==========================================
-    // 📺 WEBRTC SCREEN CASTING SIGNALING ROUTES
-    // ==========================================
-    
-    // 3. Teacher's laptop requests to stream to a specific board id
-    socket.on('request_cast', (data) => {
-        const { target_hardware_id, offer } = data;
-        const panel = connectedPanels[target_hardware_id];
-        if (panel) {
-            io.to(panel.socket_id).emit('incoming_cast_offer', {
-                sender_socket_id: socket.id,
-                offer: offer
-            });
-        }
-    });
-
-    // 4. Android board accepts screen cast and returns its WebRTC answer string
-    socket.on('answer_cast', (data) => {
-        const { target_sender_id, answer } = data;
-        io.to(target_sender_id).emit('cast_answered', { answer: answer });
-    });
-
-    // 5. Network topology routing optimization exchange (ICE Candidates)
-    socket.on('ice_candidate', (data) => {
-        io.to(data.target_id).emit('ice_candidate', { candidate: data.candidate });
-    });
-
-    // 6. Automatically clean up when an Android panel goes offline (app closed/wifi dropped)
     socket.on('disconnect', () => {
-        for (const [hwId, panelData] of Object.entries(connectedPanels)) {
-            if (panelData.socket_id === socket.id) {
-                console.log(`💀 Panel Disconnected: ${hwId}`);
-                delete connectedPanels[hwId]; // Remove from dashboard instantly
+        for (const id in connectedPanels) {
+            if (connectedPanels[id].socket_id === socket.id) {
+                connectedPanels[id].status = "OFFLINE";
+                console.log(`⚠️ Panel drop alert context triggered. Socket pipeline lost: ${id}`);
                 break;
             }
         }
     });
 });
 
-/**
- * 7. DASHBOARD GET DEVICES ENDPOINT
- * Dashboard calls this via HTTP GET to render the online cards.
- */
-app.get('/api/mdm/panels', (req, res) => {
-    res.json(connectedPanels);
-});
-
-/**
- * 8. DASHBOARD SEND COMMAND ENDPOINT
- * Control panel uses this to assign orders. We pipe it straight into the WebSocket.
- */
-app.post('/api/mdm/command', (req, res) => {
-    const { target_hardware_id, action, message } = req.body;
-    
-    if (!connectedPanels[target_hardware_id]) {
-        return res.status(404).json({ success: false, message: "Device is offline or not registered." });
+// Sweeper function to flag lost boards
+setInterval(() => {
+    const now = Date.now();
+    for (const id in connectedPanels) {
+        if (now - connectedPanels[id].lastSeen > 35000) { 
+            connectedPanels[id].status = "OFFLINE";
+        }
     }
+}, 15000);
 
-    const panelSocketId = connectedPanels[target_hardware_id].socket_id;
-
-    // Send the command directly down the live socket connection to that specific board
-    io.to(panelSocketId).emit('mdm_execute', {
-        action: action,
-        message: message,
-        payload: { text: message } 
+// ==========================================
+// 🛠️ INTERNAL NETWORK UTILITY PROXIES
+// ==========================================
+function httpsRequest(options) {
+    return new Promise((resolve, reject) => {
+        const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => resolve({ statusCode: res.statusCode, body }));
+        });
+        req.on('error', err => reject(err));
+        req.end();
     });
+}
 
-    // Update the server's local state for the dashboard UI
-    if (action === "LOCK") connectedPanels[target_hardware_id].status = "LOCKED";
-    if (action === "UNLOCK") connectedPanels[target_hardware_id].status = "ONLINE";
+function b2PostJson(urlStr, token, payload) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(urlStr);
+        const data = JSON.stringify(payload);
+        const options = {
+            hostname: url.hostname,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+                'Authorization': token,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(data)
+            }
+        };
+        const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => resolve(JSON.parse(body)));
+        });
+        req.on('error', err => reject(err));
+        req.write(data);
+        req.end();
+    });
+}
 
-    console.log(`🚀 Sent ${action} to ${target_hardware_id}`);
-    res.json({ success: true, message: `Command [${action}] transmitted securely to device.` });
+server.listen(PORT, () => {
+    console.log(`🚀 INEUU Slate Backbone online and running securely on Port ${PORT}`);
 });
-
-// 🔥 MUST USE server.listen INSTEAD OF app.listen FOR WEBSOCKETS TO BIND!
-server.listen(PORT, () => console.log(`🚀 Native B2 + WebSockets Server online on port ${PORT}`));
