@@ -352,7 +352,7 @@ function b2PostJson(urlStr, token, payload) {
         req.write(data);
         req.end();
     });
-}
+} ser
 
 server.listen(PORT, () => {
     console.log(`🚀 INEUU Slate Backbone online and running securely on Port ${PORT}`);
