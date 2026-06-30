@@ -195,7 +195,7 @@ app.post('/api/mdm/command', (req, res) => {
 });
 
 app.get('/api/mdm/devices', (req, res) => {
-    res.json(Object.values(connectedPanels));
+    res.json(connectedPanels);
 });
 
 io.on('connection', (socket) => {
