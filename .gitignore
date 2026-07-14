@@ -1,1 +1,7 @@
 node_modules/
+
+# Generated license keys map hardware IDs to activation keys - never commit real data here.
+license_keys.json
+
+# Runtime fleet registry snapshot - device/school data, not source.
+connected_panels.json
