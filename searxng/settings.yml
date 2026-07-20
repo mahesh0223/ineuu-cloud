@@ -1,0 +1,27 @@
+# Minimal override on top of SearXNG's own defaults (use_default_settings: true pulls in
+# everything else - engine list, UI, etc. - unchanged). Only the keys below differ from stock.
+use_default_settings: true
+
+general:
+  instance_name: "INEUU Slate Search"
+
+server:
+  # Random per-instance secret (not reused from anywhere else) - SearXNG uses this to sign
+  # session cookies; required to be set to something non-default before going live.
+  secret_key: "cb9a712382c0266af6b238bcda18555a1b2f4247c57afbd50e976b742d272532"
+  # The old Railway instance died silently; nothing in this app config caused that (confirmed
+  # via a 404 on every request, not a rate-limit error) - but SearXNG's default limiter is
+  # tuned for public human browser traffic and can reject a server-to-server JSON fetch like
+  # this app's searchSearxng() call outright. Disabled since this instance is private,
+  # single-consumer (only the INEUU Slate fleet calls it), not open to the public internet's
+  # normal scraping traffic the limiter is meant to guard against.
+  limiter: false
+  image_proxy: true
+
+search:
+  # JSON is disabled by default in stock SearXNG (anti-scraping default) - this app's
+  # searchSearxng() in AiController.kt requests `&format=json` and parses a top-level
+  # "results" array, so JSON has to be explicitly allowed here or every request 403s.
+  formats:
+    - html
+    - json
