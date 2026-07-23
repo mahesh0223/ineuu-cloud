@@ -74,7 +74,7 @@
       <button onclick="createSchool()">Create School</button>
     </div>
     <table>
-      <thead><tr><th>School ID</th><th>Name</th><th>Admin Username</th></tr></thead>
+      <thead><tr><th>School ID</th><th>Name</th><th>Admin Username</th><th>Actions</th></tr></thead>
       <tbody id="schoolsTableBody"></tbody>
     </table>
   </div>
@@ -134,7 +134,8 @@
         tbody.innerHTML = '';
         data.schools.forEach(s => {
           const row = document.createElement('tr');
-          row.innerHTML = `<td>${s.schoolId}</td><td>${s.schoolName}</td><td>${s.adminUsername}</td>`;
+          row.innerHTML = `<td>${s.schoolId}</td><td>${s.schoolName}</td><td>${s.adminUsername}</td>
+            <td><button class="secondary" onclick="resetSchoolPassword('${s.schoolId}','${s.schoolName.replace(/'/g, "\\'")}')">Reset Password</button></td>`;
           tbody.appendChild(row);
         });
 
@@ -149,6 +150,23 @@
         });
         select.value = currentValue;
       });
+  }
+
+  function resetSchoolPassword(schoolId, schoolName) {
+    const newPassword = prompt(`New password for "${schoolName}" (min 6 characters):`);
+    if (!newPassword) return;
+    if (newPassword.length < 6) { alert('Password must be at least 6 characters.'); return; }
+    fetch('/api/admin/reset-school-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-password': adminPassword },
+      body: JSON.stringify({ schoolId, newPassword })
+    }).then(res => res.json()).then(data => {
+      if (data.success) {
+        alert(`Password reset for "${schoolName}". Give them the new password directly - it will not be shown again.`);
+      } else {
+        alert('Failed to reset password: ' + data.message);
+      }
+    });
   }
 
   function createSchool() {

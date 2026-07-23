@@ -573,6 +573,28 @@ app.get('/api/admin/schools', requireAdmin, (req, res) => {
     res.json({ success: true, schools: list });
 });
 
+// Vendor-side override for a school that lost/forgot their password - unlike
+// /api/school/change-password, this trusts ADMIN_PASSWORD as authorization instead of the
+// school's own current password, since "I forgot my password" is exactly the case where they
+// can't provide that.
+app.post('/api/admin/reset-school-password', requireAdmin, async (req, res) => {
+    const { schoolId, newPassword } = req.body || {};
+    if (!schoolId || !newPassword) {
+        return res.status(400).json({ success: false, message: "schoolId and newPassword are both required." });
+    }
+    if (newPassword.length < 6) {
+        return res.status(400).json({ success: false, message: "New password must be at least 6 characters." });
+    }
+    const school = schools[schoolId];
+    if (!school) {
+        return res.status(404).json({ success: false, message: "Unknown schoolId." });
+    }
+    school.adminPasswordHash = await bcrypt.hash(newPassword, 10);
+    await persistSchool(schoolId);
+    console.log(`🔑 Admin reset password for school ${schoolId} (${school.schoolName}).`);
+    res.json({ success: true });
+});
+
 app.post('/api/school/login', async (req, res) => {
     const { username, password } = req.body || {};
     if (!username || !password) {
@@ -635,6 +657,31 @@ app.post('/api/school/command', requireSchoolAuth, (req, res) => {
     }
     console.log(`📡 School [${req.schoolId}] triggered command: [${action}] for Device: [${hardware_id}]`);
     return res.json({ success: true, message: "Command dispatched successfully." });
+});
+
+// Self-service password change - requires knowing the CURRENT password, same principle as the
+// teacher PIN change on the Android side, so someone who doesn't already have valid credentials
+// can't just set a new password for themselves.
+app.post('/api/school/change-password', requireSchoolAuth, async (req, res) => {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ success: false, message: "currentPassword and newPassword are both required." });
+    }
+    if (newPassword.length < 6) {
+        return res.status(400).json({ success: false, message: "New password must be at least 6 characters." });
+    }
+    const school = schools[req.schoolId];
+    if (!school) {
+        return res.status(404).json({ success: false, message: "School account no longer exists." });
+    }
+    const matches = await bcrypt.compare(currentPassword, school.adminPasswordHash);
+    if (!matches) {
+        return res.status(403).json({ success: false, message: "Current password is incorrect." });
+    }
+    school.adminPasswordHash = await bcrypt.hash(newPassword, 10);
+    await persistSchool(req.schoolId);
+    console.log(`🔑 School [${req.schoolId}] changed their own password.`);
+    res.json({ success: true });
 });
 
 // ==========================================

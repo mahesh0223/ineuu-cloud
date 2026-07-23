@@ -45,7 +45,10 @@
 <div id="dashboard" class="hidden">
   <div id="topBar">
     <h1 id="schoolTitle">📡 My Panels</h1>
-    <button class="secondary" onclick="logout()">Log Out</button>
+    <div>
+      <button class="secondary" onclick="changePassword()">Change Password</button>
+      <button class="secondary" onclick="logout()">Log Out</button>
+    </div>
   </div>
   <p class="sub">Auto-refreshes every 10 seconds. Last updated: <span id="lastUpdated">—</span></p>
 
@@ -95,6 +98,25 @@
     sessionStorage.removeItem('ineuu_school_token');
     sessionStorage.removeItem('ineuu_school_name');
     location.reload();
+  }
+
+  function changePassword() {
+    const currentPassword = prompt('Enter your current password:');
+    if (!currentPassword) return;
+    const newPassword = prompt('Enter your new password (min 6 characters):');
+    if (!newPassword) return;
+    if (newPassword.length < 6) { alert('New password must be at least 6 characters.'); return; }
+    fetch('/api/school/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ currentPassword, newPassword })
+    }).then(res => res.json()).then(data => {
+      if (data.success) {
+        alert('Password changed successfully.');
+      } else {
+        alert('Failed to change password: ' + data.message);
+      }
+    });
   }
 
   function enterDashboard() {
