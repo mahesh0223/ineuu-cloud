@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>INEUU Slate — School Admin</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #0F172A; color: #F8FAFC; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #94A3B8; font-size: 13px; margin-bottom: 20px; }
+  .card { background: #1E293B; border-radius: 12px; padding: 16px; margin-bottom: 20px; }
+  .card h2 { font-size: 14px; margin: 0 0 12px; color: #CBD5E1; text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #334155; }
+  th { color: #94A3B8; font-weight: 600; }
+  .status-online { color: #22C55E; font-weight: 600; }
+  .status-offline { color: #64748B; }
+  button { background: #2563EB; color: white; border: none; border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; margin-right: 4px; }
+  button:hover { background: #1D4ED8; }
+  button.danger { background: #DC2626; }
+  button.danger:hover { background: #B91C1C; }
+  button.secondary { background: #334155; }
+  button.secondary:hover { background: #475569; }
+  input { background: #0F172A; border: 1px solid #334155; color: #F8FAFC; border-radius: 6px; padding: 8px; font-size: 13px; }
+  #loginGate { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 60vh; }
+  #loginGate input { width: 240px; margin-bottom: 12px; }
+  .summary { display: flex; gap: 24px; margin-bottom: 16px; }
+  .stat { background: #1E293B; border-radius: 12px; padding: 16px 24px; text-align: center; }
+  .stat .num { font-size: 28px; font-weight: 700; }
+  .stat .label { font-size: 12px; color: #94A3B8; }
+  .hidden { display: none; }
+  #topBar { display: flex; justify-content: space-between; align-items: center; }
+</style>
+</head>
+<body>
+
+<div id="loginGate">
+  <h1>🏫 INEUU Slate — School Admin</h1>
+  <p class="sub">Log in with the username/password your INEUU representative gave you.</p>
+  <input type="text" id="username" placeholder="Username" />
+  <input type="password" id="password" placeholder="Password" />
+  <button onclick="login()">Log In</button>
+  <p id="loginError" class="sub" style="color:#EF4444;"></p>
+</div>
+
+<div id="dashboard" class="hidden">
+  <div id="topBar">
+    <h1 id="schoolTitle">📡 My Panels</h1>
+    <button class="secondary" onclick="logout()">Log Out</button>
+  </div>
+  <p class="sub">Auto-refreshes every 10 seconds. Last updated: <span id="lastUpdated">—</span></p>
+
+  <div class="summary">
+    <div class="stat"><div class="num" id="statTotal">0</div><div class="label">Total Panels</div></div>
+    <div class="stat"><div class="num" id="statOnline">0</div><div class="label">Online</div></div>
+    <div class="stat"><div class="num" id="statOffline">0</div><div class="label">Offline</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Your Panels</h2>
+    <table>
+      <thead>
+        <tr><th>Hardware ID</th><th>Status</th><th>Last Seen</th><th>CPU Temp</th><th>Storage</th><th>Wi-Fi</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="deviceTableBody"></tbody>
+    </table>
+    <p id="emptyState" class="sub hidden">No panels are linked to your school yet. Once a panel is activated with a license key assigned to your school, it will appear here.</p>
+  </div>
+</div>
+
+<script>
+  let token = sessionStorage.getItem('ineuu_school_token') || '';
+  let schoolName = sessionStorage.getItem('ineuu_school_name') || '';
+
+  function login() {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    fetch('/api/school/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    }).then(res => res.json()).then(data => {
+      if (data.success) {
+        token = data.token;
+        schoolName = data.schoolName;
+        sessionStorage.setItem('ineuu_school_token', token);
+        sessionStorage.setItem('ineuu_school_name', schoolName);
+        enterDashboard();
+      } else {
+        document.getElementById('loginError').textContent = data.message || 'Login failed.';
+      }
+    }).catch(() => { document.getElementById('loginError').textContent = 'Could not reach the server.'; });
+  }
+
+  function logout() {
+    sessionStorage.removeItem('ineuu_school_token');
+    sessionStorage.removeItem('ineuu_school_name');
+    location.reload();
+  }
+
+  function enterDashboard() {
+    document.getElementById('loginGate').classList.add('hidden');
+    document.getElementById('dashboard').classList.remove('hidden');
+    document.getElementById('schoolTitle').textContent = `📡 ${schoolName || 'My Panels'}`;
+    refreshDevices();
+    setInterval(refreshDevices, 10000);
+  }
+
+  if (token) {
+    // Tries the remembered session first - if it's expired/invalid, refreshDevices' 401
+    // handling below drops back to the login screen instead of showing a broken dashboard.
+    enterDashboard();
+  }
+
+  function timeSince(ms) {
+    if (!ms) return 'never';
+    const seconds = Math.floor((Date.now() - ms) / 1000);
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    return Math.floor(seconds / 3600) + 'h ago';
+  }
+
+  function refreshDevices() {
+    fetch('/api/school/devices', { headers: { 'Authorization': 'Bearer ' + token } })
+      .then(res => {
+        if (res.status === 401) {
+          logout();
+          throw new Error('session expired');
+        }
+        return res.json();
+      })
+      .then(devices => {
+        const ids = Object.keys(devices);
+        const online = ids.filter(id => devices[id].status === 'ONLINE').length;
+        document.getElementById('statTotal').textContent = ids.length;
+        document.getElementById('statOnline').textContent = online;
+        document.getElementById('statOffline').textContent = ids.length - online;
+        document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+        document.getElementById('emptyState').classList.toggle('hidden', ids.length > 0);
+
+        const tbody = document.getElementById('deviceTableBody');
+        tbody.innerHTML = '';
+        ids.sort((a, b) => (devices[b].lastSeen || 0) - (devices[a].lastSeen || 0));
+        ids.forEach(id => {
+          const d = devices[id];
+          const t = d.telemetry || {};
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td>${id}</td>
+            <td class="${d.status === 'ONLINE' ? 'status-online' : 'status-offline'}">${d.status}</td>
+            <td>${timeSince(d.lastSeen)}</td>
+            <td>${t.cpuTemp || '—'}</td>
+            <td>${t.storage || '—'}</td>
+            <td>${t.wifi || '—'}</td>
+            <td>
+              <button onclick="sendCommand('${id}','CLEAR_BOARD')">Clear Board</button>
+              <button onclick="sendCommand('${id}','LOCK_DEVICE')" class="secondary">Lock</button>
+              <button onclick="sendCommand('${id}','UNLOCK_DEVICE')" class="secondary">Unlock</button>
+              <button onclick="announceTo('${id}')">Announce</button>
+            </td>
+          `;
+          tbody.appendChild(row);
+        });
+      })
+      .catch(() => {});
+  }
+
+  function sendCommand(hardwareId, action, text) {
+    fetch('/api/school/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ hardware_id: hardwareId, action: action, text: text || '' })
+    }).then(res => res.json()).then(data => {
+      if (!data.success) alert('Command failed: ' + (data.message || data.error || 'unknown error'));
+    });
+  }
+
+  function announceTo(hardwareId) {
+    const msg = prompt('Announcement text for this panel:');
+    if (msg) sendCommand(hardwareId, 'SHOW_ANNOUNCEMENT', msg);
+  }
+</script>
+
+</body>
+</html>

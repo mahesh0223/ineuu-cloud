@@ -5,3 +5,6 @@ license_keys.json
 
 # Runtime fleet registry snapshot - device/school data, not source.
 connected_panels.json
+
+# School admin accounts (username + bcrypt password hash) - real credential data, not source.
+schools.json
